@@ -13,10 +13,16 @@
 #define USE_BROKEN_OPTIMIZATION 0
 #define	termdef	1 /* Don't define "term" external. */
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <curses.h>
-#include <stdio.h>
 #include <term.h>
+#endif
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "estruct.h"
 #include "edef.h"
 #include "efunc.h"
@@ -33,6 +39,11 @@
 #define BEL     0x07
 #define ESC     0x1B
 
+#ifdef _WIN32
+static HANDLE hConsole;
+static CONSOLE_SCREEN_BUFFER_INFO csbi;
+#endif
+
 static void tcapkopen(void);
 static void tcapkclose(void);
 static void tcapmove(int, int);
@@ -41,8 +52,6 @@ static void tcapeeop(void);
 static void tcapbeep(void);
 static void tcaprev(int);
 static int tcapcres(char *);
-static void tcapscrollregion(int top, int bot);
-static void putpad(char *str);
 
 static void tcapopen(void);
 #if PKCODE
@@ -56,8 +65,10 @@ static void tcapbcol(void);
 #if SCROLLCODE
 static void tcapscroll_reg(int from, int to, int linestoscroll);
 static void tcapscroll_delins(int from, int to, int linestoscroll);
+static void tcapscrollregion(int top, int bot);
 #endif
 
+#ifndef _WIN32
 #define TCAPSLEN 315
 static char tcapbuf[TCAPSLEN];
 static char *UP, PC, *CM, *CE, *CL, *SO, *SE;
@@ -72,9 +83,10 @@ static int term_init_ok = 0;
 #if SCROLLCODE
 static char *CS, *DL, *AL, *SF, *SR;
 #endif
+#endif // !_WIN32
 
 struct terminal term = {
-	0, /* These four values are set dynamically at open time. */
+	0,
 	0,
 	0,
 	0,
@@ -82,7 +94,7 @@ struct terminal term = {
 	SCRSIZ,
 	NPAUSE,
 	tcapopen,
-#if	PKCODE
+#if PKCODE
 	tcapclose,
 #else
 	ttclose,
@@ -98,17 +110,29 @@ struct terminal term = {
 	tcapbeep,
 	tcaprev,
 	tcapcres
-#if	COLOR
-	    , tcapfcol,
+#if COLOR
+	, tcapfcol,
 	tcapbcol
 #endif
-#if     SCROLLCODE
-	    , NULL		/* set dynamically at open time */
+#if SCROLLCODE
+	, NULL
 #endif
 };
 
 static void tcapopen(void)
 {
+#ifdef _WIN32
+	hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+	GetConsoleScreenBufferInfo(hConsole, &csbi);
+
+	term.t_ncol = csbi.dwSize.X;
+	term.t_nrow = csbi.dwSize.Y - 1;
+
+	term.t_mcol = term.t_ncol;
+	term.t_mrow = term.t_nrow;
+
+	ttopen();
+#else
 	char *t, *p;
 	char tcbuf[1024];
 	char *tv_stype;
@@ -124,25 +148,23 @@ static void tcapopen(void)
 		}
 
 		if ((tgetent(tcbuf, tv_stype)) != 1) {
-			sprintf(err_str, "Unknown terminal type %s!",
-				tv_stype);
+			sprintf(err_str, "Unknown terminal type %s!", tv_stype);
 			puts(err_str);
 			exit(1);
 		}
 
-		/* Get screen size from system, or else from termcap.  */
 		getscreensize(&int_col, &int_row);
 		term.t_nrow = int_row - 1;
 		term.t_ncol = int_col;
 
 		if ((term.t_nrow <= 0)
-		    && (term.t_nrow = (short) tgetnum("li") - 1) == -1) {
+			&& (term.t_nrow = (short) tgetnum("li") - 1) == -1) {
 			puts("termcap entry incomplete (lines)");
 			exit(1);
 		}
 
 		if ((term.t_ncol <= 0)
-		    && (term.t_ncol = (short) tgetnum("co")) == -1) {
+			&& (term.t_ncol = (short) tgetnum("co")) == -1) {
 			puts("Termcap entry incomplete (columns)");
 			exit(1);
 		}
@@ -168,13 +190,13 @@ static void tcapopen(void)
 		SO = tgetstr("so", &p);
 		if (SO != NULL)
 			revexist = TRUE;
-#if	PKCODE
-		if (tgetnum("sg") > 0) {	/* can reverse be used? P.K. */
+#if PKCODE
+		if (tgetnum("sg") > 0) {
 			revexist = FALSE;
 			SE = NULL;
 			SO = NULL;
 		}
-		TI = tgetstr("ti", &p);	/* terminal init and exit */
+		TI = tgetstr("ti", &p);
 		TE = tgetstr("te", &p);
 #endif
 
@@ -183,7 +205,7 @@ static void tcapopen(void)
 			exit(1);
 		}
 
-		if (CE == NULL)	/* will we be able to use clear to EOL? */
+		if (CE == NULL)
 			eolexist = FALSE;
 #if SCROLLCODE
 		CS = tgetstr("cs", &p);
@@ -193,7 +215,7 @@ static void tcapopen(void)
 		AL = tgetstr("al", &p);
 
 		if (CS && SR) {
-			if (SF == NULL)	/* assume '\n' scrolls forward */
+			if (SF == NULL)
 				SF = "\n";
 			term.t_scroll = tcapscroll_reg;
 		} else if (DL && AL) {
@@ -202,7 +224,6 @@ static void tcapopen(void)
 			term.t_scroll = NULL;
 		}
 #endif
-
 		if (p >= &tcapbuf[TCAPSLEN]) {
 			puts("Terminal description too big!\n");
 			exit(1);
@@ -212,21 +233,29 @@ static void tcapopen(void)
 	}
 #endif
 	ttopen();
+#endif
 }
 
-#if	PKCODE
+#if PKCODE
 static void tcapclose(void)
 {
+#ifdef _WIN32
+	// nothing to do
+#else
 	putpad(tgoto(CM, 0, term.t_nrow));
 	putpad(TE);
 	ttflush();
 	ttclose();
+#endif
 }
 #endif
 
 static void tcapkopen(void)
 {
-#if	PKCODE
+#ifdef _WIN32
+	// nothing to do
+#else
+#if PKCODE
 	putpad(TI);
 	ttflush();
 	ttrow = 999;
@@ -234,123 +263,101 @@ static void tcapkopen(void)
 	sgarbf = TRUE;
 #endif
 	strcpy(sres, "NORMAL");
+#endif
 }
 
 static void tcapkclose(void)
 {
-#if	PKCODE
+#ifdef _WIN32
+	// nothing to do
+#else
+#if PKCODE
 	putpad(TE);
 	ttflush();
+#endif
 #endif
 }
 
 static void tcapmove(int row, int col)
 {
+#ifdef _WIN32
+	COORD pos = { (SHORT)col, (SHORT)row };
+	SetConsoleCursorPosition(hConsole, pos);
+#else
 	putpad(tgoto(CM, col, row));
+#endif
 }
 
 static void tcapeeol(void)
 {
+#ifdef _WIN32
+	DWORD written;
+	COORD pos = csbi.dwCursorPosition;
+	int len = csbi.dwSize.X - pos.X;
+	FillConsoleOutputCharacter(hConsole, ' ', len, pos, &written);
+	SetConsoleCursorPosition(hConsole, pos);
+#else
 	putpad(CE);
+#endif
 }
 
 static void tcapeeop(void)
 {
+#ifdef _WIN32
+	DWORD written;
+	COORD pos = { 0, 0 };
+	DWORD size = csbi.dwSize.X * csbi.dwSize.Y;
+	FillConsoleOutputCharacter(hConsole, ' ', size, pos, &written);
+	SetConsoleCursorPosition(hConsole, pos);
+#else
 	putpad(CL);
+#endif
 }
 
-/*
- * Change reverse video status
- *
- * @state: FALSE = normal video, TRUE = reverse video.
- */
 static void tcaprev(int state)
 {
+#ifdef _WIN32
+	WORD attr;
+	if (state) {
+		GetConsoleScreenBufferInfo(hConsole, &csbi);
+		attr = BACKGROUND_BLUE | BACKGROUND_GREEN | BACKGROUND_RED;
+		SetConsoleTextAttribute(hConsole, attr);
+	} else {
+		SetConsoleTextAttribute(hConsole, csbi.wAttributes);
+	}
+#else
 	if (state) {
 		if (SO != NULL)
 			putpad(SO);
 	} else if (SE != NULL)
 		putpad(SE);
+#endif
 }
 
-/* Change screen resolution. */
 static int tcapcres(char *res)
 {
 	return TRUE;
 }
 
-#if SCROLLCODE
-
-/* move howmanylines lines starting at from to to */
-static void tcapscroll_reg(int from, int to, int howmanylines)
-{
-	int i;
-	if (to == from)
-		return;
-	if (to < from) {
-		tcapscrollregion(to, from + howmanylines - 1);
-		tcapmove(from + howmanylines - 1, 0);
-		for (i = from - to; i > 0; i--)
-			putpad(SF);
-	} else {		/* from < to */
-		tcapscrollregion(from, to + howmanylines - 1);
-		tcapmove(from, 0);
-		for (i = to - from; i > 0; i--)
-			putpad(SR);
-	}
-	tcapscrollregion(0, term.t_nrow);
-}
-
-/* move howmanylines lines starting at from to to */
-static void tcapscroll_delins(int from, int to, int howmanylines)
-{
-	int i;
-	if (to == from)
-		return;
-	if (to < from) {
-		tcapmove(to, 0);
-		for (i = from - to; i > 0; i--)
-			putpad(DL);
-		tcapmove(to + howmanylines, 0);
-		for (i = from - to; i > 0; i--)
-			putpad(AL);
-	} else {
-		tcapmove(from + howmanylines, 0);
-		for (i = to - from; i > 0; i--)
-			putpad(DL);
-		tcapmove(from, 0);
-		for (i = to - from; i > 0; i--)
-			putpad(AL);
-	}
-}
-
-/* cs is set up just like cm, so we use tgoto... */
-static void tcapscrollregion(int top, int bot)
-{
-	ttputc(PC);
-	putpad(tgoto(CS, bot, top));
-}
-
-#endif
-
 #if COLOR
-/* No colors here, ignore this. */
-static void tcapfcol(void)
-{
-}
-/* No colors here, ignore this. */
-static void tcapbcol(void)
-{
-}
+static void tcapfcol(void) {}
+static void tcapbcol(void) {}
 #endif
 
 static void tcapbeep(void)
 {
+#ifdef _WIN32
+	Beep(750, 100);
+#else
 	ttputc(BEL);
+#endif
 }
 
+#ifndef _WIN32
 static void putpad(char *str)
 {
 	tputs(str, 1, ttputc);
 }
+#endif
+
 #endif /* TERMCAP */
